@@ -986,6 +986,124 @@ def analyze_age_etf_themes(extracted_etfs, flow_df=None):
     return pd.DataFrame(rows)
 
 
+def build_age_flow_summary(flow_df, theme_df):
+    if flow_df is None or flow_df.empty:
+        empty = pd.DataFrame()
+        return {
+            "유입상위": empty,
+            "유출상위": empty,
+            "관심자금일치": empty,
+            "관심자금괴리": empty,
+            "태그별변화": empty,
+            "대표테마별변화": empty,
+            "브랜드별변화": empty,
+            "KODEX흐름": empty,
+            "경쟁ETF흐름": empty,
+        }
+
+    base = flow_df.copy()
+    base["증감액"] = pd.to_numeric(base["증감액"], errors="coerce").fillna(0)
+    base["증감률(%)"] = pd.to_numeric(base["증감률(%)"], errors="coerce")
+
+    theme_cols = ["ETF명", "분류기준명", "대표테마", "태그"]
+    if theme_df is not None and not theme_df.empty and set(theme_cols).issubset(theme_df.columns):
+        enriched = base.merge(
+            theme_df[theme_cols],
+            left_on=["추출ETF명", "매칭ETF명"],
+            right_on=["ETF명", "분류기준명"],
+            how="left",
+        )
+    else:
+        enriched = base.copy()
+        enriched["대표테마"] = ""
+        enriched["태그"] = ""
+
+    sort_cols = ["증감액"]
+    inflow = enriched[enriched["증감액"] > 0].sort_values(sort_cols, ascending=False).head(10)
+    outflow = enriched[enriched["증감액"] < 0].sort_values(sort_cols, ascending=True).head(10)
+    aligned = inflow.copy()
+    diverged = outflow.copy()
+
+    tag_rows = []
+    for _, row in enriched.iterrows():
+        tags = [tag.strip() for tag in str(row.get("태그", "")).split(",") if tag.strip()]
+        for tag in tags:
+            tag_rows.append({"태그": tag, "증감액": row["증감액"]})
+
+    if tag_rows:
+        tag_change = (
+            pd.DataFrame(tag_rows)
+            .groupby("태그")["증감액"]
+            .sum()
+            .reset_index()
+            .sort_values("증감액", ascending=False)
+            .reset_index(drop=True)
+        )
+    else:
+        tag_change = pd.DataFrame(columns=["태그", "증감액"])
+
+    if "대표테마" in enriched.columns:
+        theme_change_summary = (
+            enriched.groupby("대표테마", dropna=False)["증감액"]
+            .sum()
+            .reset_index()
+            .sort_values("증감액", ascending=False)
+            .reset_index(drop=True)
+        )
+    else:
+        theme_change_summary = pd.DataFrame(columns=["대표테마", "증감액"])
+
+    if {"브랜드", "운용사"}.issubset(enriched.columns):
+        brand_change = (
+            enriched.groupby(["브랜드", "운용사"], dropna=False)["증감액"]
+            .sum()
+            .reset_index()
+            .sort_values("증감액", ascending=False)
+            .reset_index(drop=True)
+        )
+    else:
+        brand_change = pd.DataFrame(columns=["브랜드", "운용사", "증감액"])
+
+    kodex_flow = enriched[enriched.get("브랜드", "") == "KODEX"].sort_values("증감액", ascending=False)
+    competitor_flow = enriched[
+        (enriched.get("브랜드", "") != "KODEX") & (enriched.get("브랜드", "") != "미확인")
+    ].sort_values("증감액", ascending=False)
+
+    display_cols = [
+        "연령대",
+        "추출ETF명",
+        "매칭ETF명",
+        "브랜드",
+        "운용사",
+        "대표테마",
+        "태그",
+        "현재주차",
+        "비교주차",
+        "증감액",
+        "증감률(%)",
+    ]
+    display_cols = [col for col in display_cols if col in enriched.columns]
+
+    return {
+        "유입상위": inflow[display_cols],
+        "유출상위": outflow[display_cols],
+        "관심자금일치": aligned[display_cols],
+        "관심자금괴리": diverged[display_cols],
+        "태그별변화": tag_change.head(15),
+        "대표테마별변화": theme_change_summary.head(15),
+        "브랜드별변화": brand_change,
+        "KODEX흐름": kodex_flow[display_cols].head(15),
+        "경쟁ETF흐름": competitor_flow[display_cols].head(15),
+    }
+
+
+def format_summary_table(summary, key):
+    data = summary.get(key, pd.DataFrame())
+    if data is None or data.empty:
+        return "해당 없음"
+    return data.to_string(index=False)
+
+
 def add_brand_manager_columns(data, etf_col="종목명"):
     if data is None or data.empty or etf_col not in data.columns:
         return data
@@ -998,6 +1116,7 @@ def add_brand_manager_columns(data, etf_col="종목명"):
 
 
 def generate_age_integrated_insight(age_rows, flow_df, theme_df, current_week, previous_week, investor):
+    flow_summary = build_age_flow_summary(flow_df, theme_df)
     prompt = f"""
 당신은 ETF 마케팅 인텔리전스 리포트를 작성하는 시니어 애널리스트입니다.
 증권사 앱의 연령대별 인기 ETF와 실제 ETF 순매수 데이터를 연결해, 마케팅 담당자가 바로 사용할 수 있는 고완성도 리포트를 작성하세요.
@@ -1030,10 +1149,38 @@ def generate_age_integrated_insight(age_rows, flow_df, theme_df, current_week, p
 [ETF 대표테마 및 태그]
 {theme_df.to_string(index=False)}
 
+[중간 분석 요약 - 유입 상위 ETF]
+{format_summary_table(flow_summary, "유입상위")}
+
+[중간 분석 요약 - 유출 상위 ETF]
+{format_summary_table(flow_summary, "유출상위")}
+
+[중간 분석 요약 - 관심과 자금유입 일치 ETF]
+{format_summary_table(flow_summary, "관심자금일치")}
+
+[중간 분석 요약 - 관심은 높지만 순매수 감소 ETF]
+{format_summary_table(flow_summary, "관심자금괴리")}
+
+[중간 분석 요약 - 태그별 순매수 변화 합계]
+{format_summary_table(flow_summary, "태그별변화")}
+
+[중간 분석 요약 - 대표테마별 순매수 변화 합계]
+{format_summary_table(flow_summary, "대표테마별변화")}
+
+[중간 분석 요약 - 브랜드/운용사별 순매수 변화 합계]
+{format_summary_table(flow_summary, "브랜드별변화")}
+
+[중간 분석 요약 - KODEX ETF 흐름]
+{format_summary_table(flow_summary, "KODEX흐름")}
+
+[중간 분석 요약 - 타사 경쟁 ETF 흐름]
+{format_summary_table(flow_summary, "경쟁ETF흐름")}
+
 리포트 작성 방식:
 - 아래 헤더를 반드시 사용
 - 각 헤더마다 구체적인 ETF 사례를 2개 이상 포함
 - "유입 상위", "유출 상위", "관심과 자금이 일치하는 경우", "괴리가 존재하는 경우"를 명확히 구분
+- 중간 분석 요약을 우선 근거로 사용하고, 원본 표는 보조 근거로 사용
 - 삼성자산운용 제안은 최소 3개 액션 아이템으로 작성
 - 삼성자산운용 제안은 반드시 KODEX 중심의 캠페인, 콘텐츠, 상품 포지셔닝, 경쟁 ETF 대응 관점으로 작성
 - 타사 ETF는 "경쟁사 상품", "벤치마킹 대상", "시장 수요의 신호"로만 언급
@@ -1043,15 +1190,22 @@ def generate_age_integrated_insight(age_rows, flow_df, theme_df, current_week, p
 
 ## 실제 순매수 변화
 유입 상위 ETF와 유출 ETF를 나누어 설명하세요. ETF별 증감 방향을 구체적으로 언급하고, 자금 유입이 집중된 테마와 자금 이탈이 발생한 테마를 해석하세요.
+이 섹션에는 반드시 "주요 변화:" 문단을 먼저 작성하고, "급증"과 "감소"를 나누어 작성하세요.
 
 ## 관심과 자금유입 비교
 인기 리스트에 있는 ETF 중 실제 순매수가 증가한 ETF와 감소한 ETF를 비교하세요. 관심과 자금이 일치하는 경우, 관심은 높지만 자금이 빠진 경우, 관심은 낮아 보이지만 자금 유입이 있는 경우를 구분하세요.
+이 섹션은 반드시 번호 목록으로 작성하세요.
+1. 연령대 인기 ETF 중 실제 자금 유입이 크게 발생한 ETF
+2. 연령대 인기 ETF인데 순매수는 감소하거나 대규모 유출이 발생한 ETF
+3. 연령대 관심과 실제 매수 사이 괴리
 
 ## 태그 기반 인사이트
 대표테마가 아니라 태그 조합을 중심으로 해석하세요. 예: 미국 + AI, AI + 반도체, 우주, 빅테크, 배당, 나스닥, S&P500 등. 어떤 태그 조합이 실제 자금을 받고 있고, 어떤 태그는 관심만 높은지 설명하세요.
+이 섹션은 "자금 유입을 받는 주요 테마"와 "관심만 높고 실제 매수는 둔화되거나 유출된 테마"로 나누세요.
 
 ## 삼성자산운용 제안
 KODEX 관점에서 실행 가능한 마케팅 전략을 작성하세요. 경쟁사 ETF에 자금이 유입되었다면 해당 ETF를 직접 홍보하지 말고, 대응 가능한 KODEX 상품의 노출 강화, 콘텐츠 기획, 비교 포지셔닝, 장기 투자 교육 관점으로 제안하세요.
+이 섹션은 최소 3개 전략으로 작성하고, 각 전략은 "현황 분석"과 "마케팅 전략 제안"을 포함하세요.
 
 반드시 분석할 내용:
 1. 연령대 인기 ETF 중 실제 자금 유입이 발생한 ETF
@@ -1400,6 +1554,7 @@ with tabs[10]:
                         age_investor,
                     )
                     age_theme_df = analyze_age_etf_themes(age_rows, flow_df)
+                    age_summary = build_age_flow_summary(flow_df, age_theme_df)
 
                     st.markdown("#### 추출 ETF 목록")
                     st.dataframe(extracted_df, width="stretch", hide_index=True)
@@ -1409,6 +1564,20 @@ with tabs[10]:
 
                     st.markdown("#### ETF 테마 분석")
                     st.dataframe(age_theme_df, width="stretch", hide_index=True)
+
+                    with st.expander("중간 분석 요약", expanded=False):
+                        st.caption("유입 상위 ETF")
+                        st.dataframe(age_summary["유입상위"], width="stretch", hide_index=True)
+                        st.caption("유출 상위 ETF")
+                        st.dataframe(age_summary["유출상위"], width="stretch", hide_index=True)
+                        st.caption("태그별 순매수 변화")
+                        st.dataframe(age_summary["태그별변화"], width="stretch", hide_index=True)
+                        st.caption("브랜드/운용사별 순매수 변화")
+                        st.dataframe(age_summary["브랜드별변화"], width="stretch", hide_index=True)
+                        st.caption("KODEX ETF 흐름")
+                        st.dataframe(age_summary["KODEX흐름"], width="stretch", hide_index=True)
+                        st.caption("타사 경쟁 ETF 흐름")
+                        st.dataframe(age_summary["경쟁ETF흐름"], width="stretch", hide_index=True)
 
                     st.markdown("#### Gemini 통합 인사이트")
                     with st.spinner("연령대 관심과 실제 순매수 변화를 함께 분석하는 중입니다."):
