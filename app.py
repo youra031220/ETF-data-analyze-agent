@@ -15,14 +15,19 @@ from PIL import Image
 
 
 DEFAULT_EXCEL_PATH = "ETF 순매수 데이터_260529.xlsx"
-DEFAULT_GEMINI_MODEL = "gemini-2.0-flash-lite"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_FALLBACK_MODELS = [
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-flash",
     "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
     "gemini-flash-lite-latest",
     "gemini-flash-latest",
 ]
+GEMINI_GENERATION_CONFIG = {
+    "temperature": 0.45,
+    "top_p": 0.9,
+    "max_output_tokens": 8192,
+}
 ETF_BRAND_MAP = {
     "KODEX": "삼성자산운용",
     "TIGER": "미래에셋자산운용",
@@ -710,7 +715,13 @@ def configure_gemini():
 
     genai.configure(api_key=api_key)
     model_names = [model_name] + [name for name in GEMINI_FALLBACK_MODELS if name != model_name]
-    return [genai.GenerativeModel(name) for name in model_names]
+    return [
+        genai.GenerativeModel(
+            name,
+            generation_config=GEMINI_GENERATION_CONFIG,
+        )
+        for name in model_names
+    ]
 
 
 def gemini_error_message(exc):
@@ -988,8 +999,8 @@ def add_brand_manager_columns(data, etf_col="종목명"):
 
 def generate_age_integrated_insight(age_rows, flow_df, theme_df, current_week, previous_week, investor):
     prompt = f"""
-당신은 ETF 마케팅 인텔리전스 애널리스트입니다.
-증권사 앱의 연령대별 인기 ETF와 실제 ETF 순매수 데이터를 연결해 분석하세요.
+당신은 ETF 마케팅 인텔리전스 리포트를 작성하는 시니어 애널리스트입니다.
+증권사 앱의 연령대별 인기 ETF와 실제 ETF 순매수 데이터를 연결해, 마케팅 담당자가 바로 사용할 수 있는 고완성도 리포트를 작성하세요.
 
 조건:
 - 현재 주차: {current_week}
@@ -998,6 +1009,15 @@ def generate_age_integrated_insight(age_rows, flow_df, theme_df, current_week, p
 - 관심과 실제 자금 유입을 반드시 구분
 - 데이터에서 확인되는 내용과 가설을 구분
 - 삼성자산운용 마케팅 시사점을 제안
+- 단순 요약 금지. 각 섹션은 구체적 ETF명, 테마명, 증감 방향, 마케팅 해석을 포함
+- 각 섹션은 최소 3문장 이상으로 작성하고, 핵심 섹션은 문단형으로 충분히 서술
+- 숫자는 표의 값을 근거로 사용하되, 단위가 불명확하면 "데이터 기준" 또는 "순매수 변화"라고 표현
+- 유입 상위 ETF와 유출 ETF를 구분해 설명
+- 관심은 높지만 순매수가 감소한 ETF를 반드시 별도로 해석
+- 관심과 실제 매수 흐름이 일치하는 테마와 괴리되는 테마를 모두 다룰 것
+- 태그 기반으로 "미국 + AI", "AI + 반도체", "우주", "배당", "빅테크"처럼 복합 관심사를 해석
+- 문체는 예시처럼 전문적이고 풍부한 리포트형 문장으로 작성
+- 불필요하게 짧은 bullet만 나열하지 말고, 각 bullet 아래에 설명 문장을 붙일 것
 
 {BRAND_RULE_PROMPT}
 
@@ -1010,13 +1030,28 @@ def generate_age_integrated_insight(age_rows, flow_df, theme_df, current_week, p
 [ETF 대표테마 및 태그]
 {theme_df.to_string(index=False)}
 
-반드시 다음 형식으로 작성하세요.
+리포트 작성 방식:
+- 아래 헤더를 반드시 사용
+- 각 헤더마다 구체적인 ETF 사례를 2개 이상 포함
+- "유입 상위", "유출 상위", "관심과 자금이 일치하는 경우", "괴리가 존재하는 경우"를 명확히 구분
+- 삼성자산운용 제안은 최소 3개 액션 아이템으로 작성
+- 삼성자산운용 제안은 반드시 KODEX 중심의 캠페인, 콘텐츠, 상품 포지셔닝, 경쟁 ETF 대응 관점으로 작성
+- 타사 ETF는 "경쟁사 상품", "벤치마킹 대상", "시장 수요의 신호"로만 언급
 
 ## 연령대 인기 ETF
+연령대별로 어떤 ETF와 테마가 관심을 받고 있는지 요약하세요. 단순 목록이 아니라, 해당 연령대의 투자 성향을 성장형, 지수형, 테마형, 인컴형 등으로 해석하세요.
+
 ## 실제 순매수 변화
+유입 상위 ETF와 유출 ETF를 나누어 설명하세요. ETF별 증감 방향을 구체적으로 언급하고, 자금 유입이 집중된 테마와 자금 이탈이 발생한 테마를 해석하세요.
+
 ## 관심과 자금유입 비교
+인기 리스트에 있는 ETF 중 실제 순매수가 증가한 ETF와 감소한 ETF를 비교하세요. 관심과 자금이 일치하는 경우, 관심은 높지만 자금이 빠진 경우, 관심은 낮아 보이지만 자금 유입이 있는 경우를 구분하세요.
+
 ## 태그 기반 인사이트
+대표테마가 아니라 태그 조합을 중심으로 해석하세요. 예: 미국 + AI, AI + 반도체, 우주, 빅테크, 배당, 나스닥, S&P500 등. 어떤 태그 조합이 실제 자금을 받고 있고, 어떤 태그는 관심만 높은지 설명하세요.
+
 ## 삼성자산운용 제안
+KODEX 관점에서 실행 가능한 마케팅 전략을 작성하세요. 경쟁사 ETF에 자금이 유입되었다면 해당 ETF를 직접 홍보하지 말고, 대응 가능한 KODEX 상품의 노출 강화, 콘텐츠 기획, 비교 포지셔닝, 장기 투자 교육 관점으로 제안하세요.
 
 반드시 분석할 내용:
 1. 연령대 인기 ETF 중 실제 자금 유입이 발생한 ETF
@@ -1025,6 +1060,12 @@ def generate_age_integrated_insight(age_rows, flow_df, theme_df, current_week, p
 4. 어떤 테마가 자금 유입을 받고 있는지
 5. 어떤 테마는 관심만 높고 매수는 없는지
 6. 삼성자산운용 마케팅 시사점
+
+품질 기준:
+- 최종 답변은 짧은 요약이 아니라 완성형 마케팅 리포트여야 함
+- 전체 분량은 최소 1,200자 이상을 목표로 작성
+- 섹션별로 데이터 해석과 마케팅 시사점을 연결
+- "데이터 부족"이라고 끝내지 말고, 주어진 표 안에서 관찰 가능한 범위의 인사이트를 최대한 도출
 """
 
     return validate_brand_manager_response(generate_with_gemini(prompt))
@@ -1041,11 +1082,16 @@ def generate_ai_report(top_df, rising_df, theme_df, tag_df, rotation_df, investo
 - 투자주체: {investor}
 - 현재 주차: {current_week}
 - 비교 주차: {prev_week}
-- 마케팅 담당자가 바로 읽고 실행할 수 있는 문장으로 작성
+- 마케팅 담당자가 바로 읽고 실행할 수 있는 완성형 리포트 문장으로 작성
 - 과장하지 말고 데이터에서 관찰 가능한 내용과 가설을 구분
 - 삼성자산운용 관점의 액션 아이디어 포함
 - 대표테마와 태그 분석을 함께 활용해 미국, AI, 반도체, 배당 등 복합 선호를 해석
 - AI·반도체 동반 강세, 미국 ETF 선호, 배당 수요 같은 태그 기반 인사이트를 우선 검토
+- 단순 bullet 요약 금지. 각 핵심 항목은 2~4문장 이상으로 서술
+- ETF명, 대표테마, 태그, 순매수 변화 방향을 연결해 구체적으로 해석
+- 타사 ETF는 경쟁 신호나 벤치마킹 대상으로만 설명하고, 제안은 KODEX 중심으로 작성
+- 최종 답변은 최소 1,000자 이상을 목표로 작성
+- 섹션별로 "관찰된 데이터", "해석", "마케팅 액션"이 자연스럽게 드러나야 함
 
 {BRAND_RULE_PROMPT}
 
