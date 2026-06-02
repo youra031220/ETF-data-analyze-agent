@@ -105,7 +105,7 @@ st.markdown(
         }
     }
     </style>
-    <div class="youra-credit">Team 2</div>
+    <div class="youra-credit">made by Youra Kim</div>
     """,
     unsafe_allow_html=True,
 )
